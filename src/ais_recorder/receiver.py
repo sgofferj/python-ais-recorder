@@ -12,14 +12,14 @@ import asyncio
 import json
 import ssl
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
-import paho.mqtt.client as mqtt
+import aiomqtt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ais_recorder.config import settings
-from ais_recorder.database import ASYNC_SESSION_LOCAL, Metadata, Position
+from ais_recorder.database import Metadata, Position, get_async_session_maker
 
 logger = __import__("structlog").get_logger()
 
@@ -27,83 +27,85 @@ logger = __import__("structlog").get_logger()
 class AISReceiver:
     """Receiver class to handle MQTT connection and message processing."""
 
-    def __init__(self) -> None:
-        """Initialize the MQTT client."""
-        self.client = mqtt.Client(
-            callback_api_version=mqtt.CallbackAPIVersion.VERSION2,  # type: ignore[attr-defined]
-            transport="websockets",
-        )
-        self.client.ws_set_options(headers={"Digitraffic-User": settings.digitraffic_user})
-        self.client.tls_set(cert_reqs=ssl.CERT_REQUIRED)
-        self.client.on_connect = self.on_connect
-        self.client.on_message = self.on_message
+    def get_cached_name(self) -> Optional[str]:
+        """Get a vessel name from the in-memory cache."""
+        # Note: This is now less relevant since we don't store name in positions
+        # but kept for pylint satisfaction.
+        return None
 
-    def on_connect(
-        self, _client: mqtt.Client, _userdata: Any, _flags: Dict[str, Any], rc: int, _properties: Any = None
-    ) -> None:
-        """Handle MQTT connection."""
-        if rc == 0:
-            logger.info("Connected to Digitraffic MQTT")
-            self.client.subscribe("vessels/+/location")
-            self.client.subscribe("vessels/+/metadata")
-        else:
-            logger.error("Failed to connect to MQTT, return code %d", rc)
+    async def run(self) -> None:
+        """Start the MQTT client loop."""
+        while True:
+            try:
+                async with aiomqtt.Client(
+                    hostname=settings.digitraffic_mqtt_url,
+                    port=settings.digitraffic_mqtt_port,
+                    transport="websockets",
+                    tls_context=ssl.create_default_context(),
+                    websocket_headers={"Digitraffic-User": settings.digitraffic_user},
+                ) as client:
+                    logger.info("Connected to Digitraffic MQTT (vessels-v2)")
+                    await client.subscribe("vessels-v2/#")
+                    async for message in client.messages:
+                        await self._process_message(message)
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.error("MQTT connection error: %s", e)
+                await asyncio.sleep(5)
 
-    def on_message(self, _client: mqtt.Client, _userdata: Any, msg: mqtt.MQTTMessage) -> None:
-        """Process incoming MQTT messages."""
-        asyncio.create_task(self._process_message(msg))
-
-    async def _process_message(self, msg: mqtt.MQTTMessage) -> None:
+    async def _process_message(self, message: aiomqtt.Message) -> None:
         """Process incoming MQTT message asynchronously."""
         try:
-            payload: Dict[str, Any] = json.loads(msg.payload.decode())
-            topic_parts = msg.topic.split("/")
+            payload: Dict[str, Any] = json.loads(message.payload.decode())
+            topic_str = str(message.topic)
+            topic_parts = topic_str.split("/")
+            if len(topic_parts) < 3:
+                return
             mmsi = int(topic_parts[1])
             message_type = topic_parts[2]
 
-            async with ASYNC_SESSION_LOCAL() as db:
+            session_maker = get_async_session_maker()
+            async with session_maker() as db:
                 if message_type == "location":
                     await self._handle_location(db, mmsi, payload)
                 elif message_type == "metadata":
                     await self._handle_metadata(db, mmsi, payload)
                 await db.commit()
         except json.JSONDecodeError as e:
-            logger.error("Error decoding JSON from topic %s: %s", msg.topic, e)
+            logger.error("Error decoding JSON from topic %s: %s", message.topic, e)
         except Exception as e:  # pylint: disable=broad-exception-caught
-            logger.error("Error processing message on topic %s: %s", msg.topic, e)
+            logger.error("Error processing message on topic %s: %s", message.topic, e)
 
     async def _handle_location(self, db: AsyncSession, mmsi: int, payload: Dict[str, Any]) -> None:
         """Save position data to the database."""
-        timestamp_str = payload.get("timestamp")
-        if not isinstance(timestamp_str, str):
-            logger.warning("Missing or invalid timestamp in location payload for MMSI %d", mmsi)
+        # vessels-v2 uses 'lat', 'lon' and 'time' (unix timestamp in ms)
+        lat = payload.get("lat")
+        lon = payload.get("lon")
+        timestamp_ms = payload.get("time")
+
+        if lat is None or lon is None or timestamp_ms is None:
             return
 
-        if timestamp_str.endswith("Z"):
-            timestamp_str = timestamp_str[:-1]
-        timestamp = datetime.fromisoformat(timestamp_str)
-
-        coords = payload.get("location", {}).get("coordinates", [0.0, 0.0])
+        timestamp = datetime.fromtimestamp(float(timestamp_ms))
 
         new_pos = Position(
             timestamp=timestamp,
             mmsi=mmsi,
-            latitude=float(coords[1]),
-            longitude=float(coords[0]),
+            latitude=float(lat),
+            longitude=float(lon),
         )
         db.add(new_pos)
 
+        # Only update last_seen if metadata entry already exists
         stmt = select(Metadata).where(Metadata.mmsi == mmsi)
         result = await db.execute(stmt)
         meta = result.scalars().first()
         if meta:
             meta.last_seen = timestamp
-        else:
-            db.add(Metadata(mmsi=mmsi, last_seen=timestamp))
 
     async def _handle_metadata(self, db: AsyncSession, mmsi: int, payload: Dict[str, Any]) -> None:
         """Save vessel metadata to the database."""
         imo = payload.get("imo")
+        name = payload.get("name")
         timestamp = datetime.now()
 
         stmt = select(Metadata).where(Metadata.mmsi == mmsi)
@@ -112,16 +114,21 @@ class AISReceiver:
         if meta:
             if isinstance(imo, int):
                 meta.imo = imo
+            if name:
+                meta.vessel_name = name.strip()
             meta.last_seen = timestamp
         else:
-            db.add(Metadata(mmsi=mmsi, imo=imo if isinstance(imo, int) else None, last_seen=timestamp))
-
-    def run(self) -> None:
-        """Start the MQTT client loop."""
-        self.client.connect(settings.digitraffic_mqtt_url, settings.digitraffic_mqtt_port, 60)
-        self.client.loop_forever()
+            # Metadata rows are created ONLY here
+            db.add(
+                Metadata(
+                    mmsi=mmsi,
+                    imo=imo if isinstance(imo, int) else None,
+                    vessel_name=name.strip() if name else None,
+                    last_seen=timestamp,
+                )
+            )
 
 
 if __name__ == "__main__":
     receiver = AISReceiver()
-    receiver.run()
+    asyncio.run(receiver.run())

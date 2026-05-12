@@ -4,7 +4,6 @@ CREATE TABLE IF NOT EXISTS positions (
     id INT AUTO_INCREMENT PRIMARY KEY,
     timestamp DATETIME NOT NULL,
     mmsi INT NOT NULL,
-    vessel_name VARCHAR(255),
     latitude FLOAT NOT NULL,
     longitude FLOAT NOT NULL,
     INDEX ix_positions_timestamp (timestamp),
@@ -14,5 +13,6 @@ CREATE TABLE IF NOT EXISTS positions (
 CREATE TABLE IF NOT EXISTS metadata (
     mmsi INT PRIMARY KEY,
     imo INT,
+    vessel_name VARCHAR(255),
     last_seen DATETIME NOT NULL
 );

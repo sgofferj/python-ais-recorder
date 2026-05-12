@@ -17,7 +17,7 @@ services:
       - mariadb_data:/var/lib/mysql
       - ./alembic/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      test: ["CMD", "mariadb-admin", "ping", "-u", "${MARIADB_USER:-ais_user}", "-p${MARIADB_PASSWORD:-ais_password}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -35,6 +35,8 @@ services:
       MARIADB_USER: ${MARIADB_USER:-ais_user}
       MARIADB_PASSWORD: ${MARIADB_PASSWORD:-ais_password}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "8000:8000"
     depends_on:
       mariadb:
         condition: service_healthy

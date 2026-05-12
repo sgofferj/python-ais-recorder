@@ -11,12 +11,12 @@
 import asyncio
 from datetime import datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import CursorResult, delete
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from ais_recorder.config import settings
-from ais_recorder.database import ASYNC_SESSION_LOCAL, Metadata, Position
+from ais_recorder.database import Metadata, Position, get_async_session_maker
 
 logger = __import__("structlog").get_logger()
 
@@ -26,31 +26,29 @@ async def cleanup_task() -> None:
     logger.info("Starting data retention cleanup task")
     now = datetime.now()
 
-    async with ASYNC_SESSION_LOCAL() as db:
-        retention_limit = now - timedelta(hours=settings.retention_hours)
-        stmt = select(Position).where(Position.timestamp < retention_limit)
-        result = await db.execute(stmt)
-        positions_to_delete = result.scalars().all()
-        deleted_positions = len(positions_to_delete)
-        for pos in positions_to_delete:
-            await db.delete(pos)
+    session_maker = get_async_session_maker()
+    async with session_maker() as db:
+        try:
+            retention_limit = now - timedelta(hours=settings.retention_hours)
+            # Use more efficient delete statement
+            stmt = delete(Position).where(Position.timestamp < retention_limit)
+            result = await db.execute(stmt)
+            if isinstance(result, CursorResult):
+                logger.info("Deleted %d old positions", result.rowcount)
 
-        logger.info("Deleted %d old positions", deleted_positions)
+            metadata_limit = now - timedelta(days=30)
+            stmt_meta = delete(Metadata).where(Metadata.last_seen < metadata_limit)
+            result_meta = await db.execute(stmt_meta)
+            if isinstance(result_meta, CursorResult):
+                logger.info("Deleted %d old metadata entries", result_meta.rowcount)
 
-        metadata_limit = now - timedelta(days=30)
-        stmt_meta = select(Metadata).where(Metadata.last_seen < metadata_limit)
-        result_meta = await db.execute(stmt_meta)
-        metadata_to_delete = result_meta.scalars().all()
-        deleted_metadata = len(metadata_to_delete)
-        for meta in metadata_to_delete:
-            await db.delete(meta)
-
-        logger.info("Deleted %d old metadata entries", deleted_metadata)
-
-        await db.commit()
+            await db.commit()
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.error("Error during cleanup task: %s", e)
+            await db.rollback()
 
 
-def start_retention_worker() -> None:
+async def run_retention_worker() -> None:
     """Start the retention scheduler."""
     scheduler = AsyncIOScheduler()
     interval_hours = max(1, settings.retention_hours // 2)
@@ -59,10 +57,11 @@ def start_retention_worker() -> None:
     scheduler.start()
 
     try:
-        asyncio.get_event_loop().run_forever()
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Retention worker stopped")
+        while True:
+            await asyncio.sleep(3600)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        scheduler.shutdown()
 
 
 if __name__ == "__main__":
-    start_retention_worker()
+    asyncio.run(run_retention_worker())

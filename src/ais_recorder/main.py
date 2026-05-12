@@ -22,7 +22,7 @@ from ais_recorder.api import app
 from ais_recorder.config import settings
 from ais_recorder.database import init_db
 from ais_recorder.receiver import AISReceiver
-from ais_recorder.retention import start_retention_worker
+from ais_recorder.retention import run_retention_worker
 
 
 def configure_logging() -> None:
@@ -63,7 +63,7 @@ def run_receiver() -> None:
     logger = structlog.get_logger()
     logger.info("Starting AIS receiver worker")
     receiver = AISReceiver()
-    receiver.run()
+    asyncio.run(receiver.run())
 
 
 def run_retention() -> None:
@@ -71,7 +71,7 @@ def run_retention() -> None:
     configure_logging()
     logger = structlog.get_logger()
     logger.info("Starting retention worker")
-    start_retention_worker()
+    asyncio.run(run_retention_worker())
 
 
 def main() -> None:

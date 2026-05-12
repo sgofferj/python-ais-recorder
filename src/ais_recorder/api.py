@@ -9,7 +9,7 @@
 """REST API for querying AIS data."""
 
 from datetime import datetime
-from typing import List, Optional, Sequence
+from typing import Any, List, Optional, Sequence
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from sqlalchemy import select
@@ -37,12 +37,19 @@ async def query_positions(  # pylint: disable=too-many-arguments,too-many-positi
     end_time: Optional[datetime] = None,
     bbox: Optional[str] = Query(None, description="BBox format: min_lon,min_lat,max_lon,max_lat"),
     db: AsyncSession = Depends(get_db),
-) -> Sequence[Position]:
+) -> Sequence[Any]:
     """Query historical AIS positions with various filters."""
-    stmt = select(Position)
+    # Select columns from Position and vessel_name from Metadata
+    stmt = select(
+        Position.timestamp,
+        Position.mmsi,
+        Position.latitude,
+        Position.longitude,
+        Metadata.vessel_name,
+    ).outerjoin(Metadata, Position.mmsi == Metadata.mmsi)
 
     if imo is not None:
-        stmt = stmt.join(Metadata, Position.mmsi == Metadata.mmsi).where(Metadata.imo == imo)
+        stmt = stmt.where(Metadata.imo == imo)
 
     if mmsi is not None:
         stmt = stmt.where(Position.mmsi == mmsi)
@@ -68,7 +75,7 @@ async def query_positions(  # pylint: disable=too-many-arguments,too-many-positi
 
     stmt = stmt.order_by(Position.timestamp.desc())
     result = await db.execute(stmt)
-    positions = result.scalars().all()
+    positions = result.mappings().all()
 
     return positions
 
