@@ -81,9 +81,17 @@ async def query_positions(  # pylint: disable=too-many-arguments,too-many-positi
 
 
 @app.get("/vessels", response_model=List[VesselResponse])
-async def list_vessels(db: AsyncSession = Depends(get_db)) -> Sequence[Metadata]:
-    """List all vessels in the metadata table."""
+async def list_vessels(
+    mmsi: Optional[int] = None, imo: Optional[int] = None, db: AsyncSession = Depends(get_db)
+) -> Sequence[Metadata]:
+    """List all vessels in the metadata table with optional filters."""
     stmt = select(Metadata)
+
+    if mmsi is not None:
+        stmt = stmt.where(Metadata.mmsi == mmsi)
+    if imo is not None:
+        stmt = stmt.where(Metadata.imo == imo)
+
     result = await db.execute(stmt)
     vessels = result.scalars().all()
     return vessels
