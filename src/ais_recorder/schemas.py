@@ -25,7 +25,7 @@ class PositionResponse(BaseModel):
     """Schema for AIS position data in API responses."""
 
     timestamp: datetime
-    mmsi: int = Field(..., ge=100000000, le=999999999)
+    mmsi: int
     vessel_name: Optional[str] = Field(None, max_length=255)
     latitude: float = Field(..., ge=-90, le=90)
     longitude: float = Field(..., ge=-180, le=180)
@@ -36,8 +36,9 @@ class PositionResponse(BaseModel):
 class VesselResponse(BaseModel):
     """Schema for vessel metadata in API responses."""
 
-    mmsi: int = Field(..., ge=100000000, le=999999999)
-    imo: Optional[int] = Field(None, ge=1000000, le=9999999)
+    mmsi: int
+    imo: Optional[int] = None
+    vessel_name: Optional[str] = Field(None, max_length=255)
     last_seen: datetime
 
     model_config = ConfigDict(from_attributes=True)
@@ -62,5 +63,5 @@ class AISMetadataPayload(BaseModel):
     """Schema for validating incoming AIS metadata."""
 
     name: Optional[str] = Field(None, max_length=255)
-    imo: Optional[int] = Field(None, ge=1000000, le=9999999)
-    mmsi: Optional[int] = Field(None, ge=100000000, le=999999999)
+    imo: Optional[int] = None
+    mmsi: Optional[int] = None
